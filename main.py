@@ -1,24 +1,28 @@
 import csv
 import io
 import os
-from datetime import datetime
 import secrets
+from datetime import datetime
 
-from fastapi import FastAPI, File, Form, Request, UploadFile, Depends, HTTPException, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.staticfiles import StaticFiles
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-app = FastAPI()
+# Imports pour le PDF (ReportLab)
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
+app = FastAPI()
 security = HTTPBasic()
 
-# Identifiants de connexion (À personnaliser ou via variables d'environnement)
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "Caisse2026!")
 
@@ -33,9 +37,7 @@ def verifier_authentification(credentials: HTTPBasicCredentials = Depends(securi
         )
     return credentials.username
 
-# Configuration base de données (PostgreSQL sur Render/Neon, SQLite par défaut en local)
 DATABASE_URL = os.getenv("DATABASE_URL")
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 JUSTIFICATIFS_DIR = os.path.join(BASE_DIR, "justificatifs")
 os.makedirs(JUSTIFICATIFS_DIR, exist_ok=True)
@@ -44,11 +46,9 @@ app.mount("/justificatifs", StaticFiles(directory=JUSTIFICATIFS_DIR), name="just
 
 def get_db():
     if DATABASE_URL:
-        # Connexion PostgreSQL Neon
         conn = psycopg2.connect(DATABASE_URL, sslmode="require")
         return conn, "postgres"
     else:
-        # SQLite fallback local
         import sqlite3
         conn = sqlite3.connect("caisse.db")
         return conn, "sqlite"
@@ -269,7 +269,8 @@ async def api_ajouter(request: Request):
         
         utilisateur = str(form.get("utilisateur", "Inconnu"))
         type_trans = str(form.get("type", ""))
-        montant = float(form.get("montant", 0))
+        montant_val = form.get("montant", 0)
+        montant = float(montant_val) if montant_val else 0.0
         motif = str(form.get("motif", ""))
         mode_paiement = str(form.get("mode_paiement", "ESPECES"))
         categorie = str(form.get("categorie", "GÉNÉRAL"))
@@ -391,16 +392,109 @@ async def export_excel():
     wb.save(output)
     output.seek(0)
 
-    filename = f"Journal_Caisse_Nettoyage_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    filename = f"Journal_Caisse_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
+@app.get("/api/export/pdf", dependencies=[Depends(verifier_authentification)])
+async def export_pdf():
+    data_summary = obtenir_historique_et_solde()
+    conn, db_type = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, horodatage, utilisateur, type, motif, mode_paiement, montant FROM transactions WHERE cloture = 0 ORDER BY id DESC")
+    rows = cursor.fetchall()
+    conn.close()
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    story = []
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'TitleStyle',
+        parent=styles['Heading1'],
+        fontSize=16,
+        leading=20,
+        textColor=colors.HexColor('#1E293B'),
+        alignment=1,
+        spaceAfter=15
+    )
+
+    story.append(Paragraph("<b>JOURNAL ET RELEVÉ DE CAISSE</b>", title_style))
+    story.append(Paragraph(f"<font size=9 color='#64748B'>Date d'impression : {datetime.now().strftime('%d/%m/%Y %H:%M')}</font>", styles['Normal']))
+    story.append(Spacer(1, 15))
+
+    # Résumé des Soldes
+    solde_data = [
+        ["Solde Espèces", "Solde Mobile", "Solde Banque", "SOLDE TOTAL"],
+        [
+            f"{data_summary['solde_especes']:,} MRU",
+            f"{data_summary['solde_mobile']:,} MRU",
+            f"{data_summary['solde_banque']:,} MRU",
+            f"{data_summary['solde_total']:,} MRU"
+        ]
+    ]
+    solde_table = Table(solde_data, colWidths=[130, 130, 130, 145])
+    solde_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F1F5F9')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#475569')),
+        ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
+        ('TEXTCOLOR', (3, 1), (3, 1), colors.HexColor('#16A34A')),
+    ]))
+    story.append(solde_table)
+    story.append(Spacer(1, 20))
+
+    # Table des Transactions
+    table_data = [["ID", "Horodatage", "Agent", "Type", "Motif", "Mode", "Montant (MRU)"]]
+    for r in rows:
+        table_data.append([
+            str(r[0]),
+            str(r[1]),
+            str(r[2]),
+            str(r[3]),
+            str(r[4]),
+            str(r[5]),
+            f"{float(r[6]):,}"
+        ])
+
+    t_table = Table(table_data, colWidths=[30, 95, 80, 55, 140, 65, 70])
+    t_style = [
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1E293B')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 8),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('ALIGN', (6, 0), (6, -1), 'RIGHT'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+    ]
+
+    for idx, r in enumerate(rows, start=1):
+        if r[3] == "ENTREE":
+            t_style.append(('TEXTCOLOR', (3, idx), (3, idx), colors.HexColor('#166534')))
+        else:
+            t_style.append(('TEXTCOLOR', (3, idx), (3, idx), colors.HexColor('#991B1B')))
+
+    t_table.setStyle(TableStyle(t_style))
+    story.append(t_table)
+
+    doc.build(story)
+    buffer.seek(0)
+
+    filename = f"Releve_Caisse_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+    return StreamingResponse(
+        buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
 @app.get("/", response_class=HTMLResponse, dependencies=[Depends(verifier_authentification)])
 async def get_interface():
-    # Code HTML de l'interface identique
     return r"""
     <!DOCTYPE html>
     <html lang="fr">
@@ -453,7 +547,7 @@ async def get_interface():
 
                 <div class="grid grid-cols-2 gap-2">
                     <input id="motif" type="text" placeholder="Motif" class="p-2 border rounded-lg text-xs">
-                    <input id="montant" type="number" placeholder="Montant (MRU)" class="w-full p-2 border rounded-lg text-xs font-bold">
+                    <input id="montant" type="number" step="any" placeholder="Montant (MRU)" class="w-full p-2 border rounded-lg text-xs font-bold">
                 </div>
                 
                 <select id="mode-paiement" class="w-full p-2 border rounded-lg text-xs bg-slate-50 font-semibold">
@@ -468,8 +562,8 @@ async def get_interface():
                 <input id="justificatifs" type="file" accept="image/*,.pdf" multiple class="w-full text-[10px] bg-white border rounded-lg p-1.5">
 
                 <div class="flex gap-2 pt-1">
-                    <button type="button" onclick="envoyer('ENTREE')" class="w-1/2 bg-green-600 text-white font-bold py-2 rounded-lg text-xs shadow">+ ENTRÉE</button>
-                    <button type="button" onclick="envoyer('SORTIE')" class="w-1/2 bg-red-600 text-white font-bold py-2 rounded-lg text-xs shadow">- SORTIE</button>
+                    <button type="button" onclick="envoyer('ENTREE')" class="w-1/2 bg-green-600 hover:bg-green-700 text-white font-bold py-2 rounded-lg text-xs shadow transition-colors">+ ENTRÉE</button>
+                    <button type="button" onclick="envoyer('SORTIE')" class="w-1/2 bg-red-600 hover:bg-red-700 text-white font-bold py-2 rounded-lg text-xs shadow transition-colors">- SORTIE</button>
                 </div>
             </div>
 
@@ -479,49 +573,83 @@ async def get_interface():
             </div>
 
             <div class="border-t pt-3 space-y-2">
-                <a href="/api/export/excel" download class="block text-center bg-emerald-600 text-white text-[11px] font-bold py-2 rounded-lg">📊 Export Excel (.xlsx)</a>
-                <button type="button" onclick="cloturerJournee()" class="w-full bg-slate-800 text-white text-xs font-bold py-2 rounded-lg">📊 Clôturer la Journée</button>
+                <div class="grid grid-cols-2 gap-2">
+                    <a href="/api/export/excel" download class="block text-center bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold py-2 rounded-lg transition-colors">📊 Export Excel</a>
+                    <a href="/api/export/pdf" download class="block text-center bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold py-2 rounded-lg transition-colors">📄 Export PDF</a>
+                </div>
+                <button type="button" onclick="cloturerJournee()" class="w-full bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold py-2 rounded-lg transition-colors">📊 Clôturer la Journée</button>
             </div>
         </div>
 
         <script>
             async function chargerDonnees() {
-                const res = await fetch('/api/data');
-                if (res.status === 401) { location.reload(); return; }
-                const data = await res.json();
-                document.getElementById('solde-total').innerText = data.solde_total.toLocaleString() + ' MRU';
-                document.getElementById('solde-especes').innerText = data.solde_especes.toLocaleString() + ' MRU';
-                document.getElementById('solde-mobile').innerText = data.solde_mobile.toLocaleString() + ' MRU';
-                document.getElementById('solde-banque').innerText = data.solde_banque.toLocaleString() + ' MRU';
-                
-                const histDiv = document.getElementById('historique');
-                histDiv.innerHTML = '';
-                data.transactions.forEach(t => {
-                    const color = t.type === 'ENTREE' ? 'text-green-700 bg-green-50' : 'text-red-700 bg-red-50';
-                    histDiv.innerHTML += `
-                        <div class="p-2 rounded border ${color} text-xs flex justify-between">
-                            <span>[${t.mode}] ${t.motif}</span>
-                            <span class="font-bold">${t.montant.toLocaleString()} MRU</span>
-                        </div>`;
-                });
+                try {
+                    const res = await fetch('/api/data');
+                    if (res.status === 401) { location.reload(); return; }
+                    const data = await res.json();
+                    
+                    document.getElementById('solde-total').innerText = data.solde_total.toLocaleString() + ' MRU';
+                    document.getElementById('solde-total-mro').innerText = 'Soit: ' + (data.solde_total * 10).toLocaleString() + ' MRO';
+                    document.getElementById('solde-especes').innerText = data.solde_especes.toLocaleString() + ' MRU';
+                    document.getElementById('solde-mobile').innerText = data.solde_mobile.toLocaleString() + ' MRU';
+                    document.getElementById('solde-banque').innerText = data.solde_banque.toLocaleString() + ' MRU';
+                    
+                    const histDiv = document.getElementById('historique');
+                    histDiv.innerHTML = '';
+                    data.transactions.forEach(t => {
+                        const color = t.type === 'ENTREE' ? 'text-green-700 bg-green-50' : 'text-red-700 bg-red-50';
+                        histDiv.innerHTML += `
+                            <div class="p-2 rounded border ${color} text-xs flex justify-between items-center">
+                                <div>
+                                    <span class="font-bold">[${t.mode}]</span> ${t.motif}
+                                    <span class="text-[10px] text-gray-500 block">${t.heure} - ${t.utilisateur}</span>
+                                </div>
+                                <span class="font-bold">${t.montant.toLocaleString()} MRU</span>
+                            </div>`;
+                    });
+                } catch (e) {
+                    console.error("Erreur de chargement:", e);
+                }
             }
 
             async function envoyer(typeTrans) {
+                const montantInput = document.getElementById('montant');
+                const motifInput = document.getElementById('motif');
+                
+                if (!montantInput.value || parseFloat(montantInput.value) <= 0) {
+                    alert("Veuillez saisir un montant valide.");
+                    return;
+                }
+
                 const formData = new FormData();
                 formData.append('utilisateur', document.getElementById('user-select').value);
                 formData.append('type', typeTrans);
-                formData.append('montant', document.getElementById('montant').value);
-                formData.append('motif', document.getElementById('motif').value);
+                formData.append('montant', montantInput.value);
+                formData.append('motif', motifInput.value || 'Opération ' + typeTrans);
                 formData.append('mode_paiement', document.getElementById('mode-paiement').value);
                 formData.append('categorie', document.getElementById('categorie').value);
                 formData.append('entite', document.getElementById('entite').value);
 
-                for (let f of document.getElementById('justificatifs').files) {
+                const files = document.getElementById('justificatifs').files;
+                for (let f of files) {
                     formData.append('justificatifs', f);
                 }
 
-                const res = await fetch('/api/ajouter', { method: 'POST', body: formData });
-                if (res.ok) { chargerDonnees(); }
+                try {
+                    const res = await fetch('/api/ajouter', { method: 'POST', body: formData });
+                    if (res.ok) {
+                        montantInput.value = '';
+                        motifInput.value = '';
+                        document.getElementById('entite').value = '';
+                        document.getElementById('justificatifs').value = '';
+                        chargerDonnees();
+                    } else {
+                        alert("Erreur lors de l'enregistrement de l'opération.");
+                    }
+                } catch (e) {
+                    console.error("Erreur réseau:", e);
+                    alert("Impossible de contacter le serveur.");
+                }
             }
 
             async function cloturerJournee() {

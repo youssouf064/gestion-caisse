@@ -1,0 +1,13 @@
+# Environnement virtuel
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Base de données locale SQLite & Justificatifs
+*.db
+caisse.db
+justificatifs/
+
+# Variables d'environnement / Secrets
+.env
