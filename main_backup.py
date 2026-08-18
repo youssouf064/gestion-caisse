@@ -1,30 +1,21 @@
-import csv
-import io
-import os
+from fastapi import FastAPI, Request, UploadFile, File, Form
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import sqlite3
 from datetime import datetime
-
-from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+import io
+import csv
 import openpyxl
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 app = FastAPI()
 
-# Dossier d'enregistrement des justificatifs (chemin absolu garanti)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-JUSTIFICATIFS_DIR = os.path.join(BASE_DIR, "justificatifs")
+# Dossier où seront enregistrés les factures/justificatifs
+JUSTIFICATIFS_DIR = "justificatifs"
+import os
 os.makedirs(JUSTIFICATIFS_DIR, exist_ok=True)
-
-# Publication du dossier statique
-app.mount(
-    "/justificatifs",
-    StaticFiles(directory=JUSTIFICATIFS_DIR),
-    name="justificatifs",
-)
-
+app.mount("/justificatifs", StaticFiles(directory=JUSTIFICATIFS_DIR), name="justificatifs")
 
 def init_db():
     conn = sqlite3.connect("caisse.db")
@@ -43,18 +34,15 @@ def init_db():
             cloture INTEGER DEFAULT 0
         )
     """)
-
+    
+    # Migration automatique si la base existait déjà sans les nouvelles colonnes
     cursor.execute("PRAGMA table_info(transactions)")
     colonnes = [col[1] for col in cursor.fetchall()]
     if "categorie" not in colonnes:
-        cursor.execute(
-            "ALTER TABLE transactions ADD COLUMN categorie TEXT DEFAULT 'GÉNÉRAL'"
-        )
+        cursor.execute("ALTER TABLE transactions ADD COLUMN categorie TEXT DEFAULT 'GÉNÉRAL'")
     if "entite" not in colonnes:
-        cursor.execute(
-            "ALTER TABLE transactions ADD COLUMN entite TEXT DEFAULT ''"
-        )
-
+        cursor.execute("ALTER TABLE transactions ADD COLUMN entite TEXT DEFAULT ''")
+        
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS justificatifs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,19 +59,9 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 init_db()
 
-
-def ajouter_transaction(
-    utilisateur,
-    type_trans,
-    montant,
-    motif,
-    mode_paiement,
-    categorie="GÉNÉRAL",
-    entite="",
-):
+def ajouter_transaction(utilisateur, type_trans, montant, motif, mode_paiement, categorie="GÉNÉRAL", entite=""):
     conn = sqlite3.connect("caisse.db")
     cursor = conn.cursor()
     heure = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -91,26 +69,14 @@ def ajouter_transaction(
         """INSERT INTO transactions 
            (utilisateur, type, montant, motif, categorie, entite, mode_paiement, horodatage) 
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            utilisateur,
-            type_trans,
-            montant,
-            motif,
-            categorie,
-            entite,
-            mode_paiement,
-            heure,
-        ),
+        (utilisateur, type_trans, montant, motif, categorie, entite, mode_paiement, heure)
     )
     transaction_id = cursor.lastrowid
     conn.commit()
     conn.close()
     return transaction_id
 
-
-def enregistrer_justificatif(
-    transaction_id, nom_fichier, nom_original, type_fichier, chemin
-):
+def enregistrer_justificatif(transaction_id, nom_fichier, nom_original, type_fichier, chemin):
     conn = sqlite3.connect("caisse.db")
     cursor = conn.cursor()
     cursor.execute(
@@ -123,12 +89,11 @@ def enregistrer_justificatif(
             nom_original,
             type_fichier or "",
             chemin,
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        ),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
     )
     conn.commit()
     conn.close()
-
 
 def cloturer_caisse():
     conn = sqlite3.connect("caisse.db")
@@ -137,51 +102,16 @@ def cloturer_caisse():
     conn.commit()
     conn.close()
 
-
 def obtenir_historique_et_solde():
     conn = sqlite3.connect("caisse.db")
     cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT id, utilisateur, type, montant, motif, mode_paiement, horodatage, categorie, entite 
-        FROM transactions WHERE cloture = 0 ORDER BY id DESC LIMIT 50
-    """)
+    cursor.execute(
+        """SELECT utilisateur, type, montant, motif, mode_paiement, horodatage, categorie, entite 
+           FROM transactions WHERE cloture = 0 ORDER BY id DESC LIMIT 40"""
+    )
     rows = cursor.fetchall()
-
-    transaction_ids = [r[0] for r in rows]
-    justificatifs = {}
-    if transaction_ids:
-        placeholders = ",".join(["?"] * len(transaction_ids))
-        cursor.execute(
-            f"""
-            SELECT transaction_id, nom_fichier, nom_original, type_fichier, chemin 
-            FROM justificatifs WHERE transaction_id IN ({placeholders})
-        """,
-            transaction_ids,
-        )
-        for row in cursor.fetchall():
-            t_id, nom_f, nom_orig, t_type, path = row
-            if t_id not in justificatifs:
-                justificatifs[t_id] = []
-
-            ext = os.path.splitext(nom_orig)[1].lower()
-            if not t_type or t_type == "application/octet-stream":
-                if ext == ".pdf":
-                    t_type = "application/pdf"
-                elif ext in [".jpg", ".jpeg", ".png", ".webp"]:
-                    t_type = f"image/{ext.replace('.', '')}"
-
-            justificatifs[t_id].append({
-                "nom": nom_orig,
-                "url": f"/justificatifs/{nom_f}",
-                "type": t_type,
-            })
-
-    cursor.execute("""
-        SELECT mode_paiement, type, SUM(montant) 
-        FROM transactions WHERE cloture = 0 
-        GROUP BY mode_paiement, type
-    """)
+    
+    cursor.execute("SELECT mode_paiement, type, SUM(montant) FROM transactions WHERE cloture = 0 GROUP BY mode_paiement, type")
     totaux_raw = cursor.fetchall()
     conn.close()
 
@@ -191,22 +121,22 @@ def obtenir_historique_et_solde():
         "MASRVI": {"ENTREE": 0.0, "SORTIE": 0.0},
         "SEDAD": {"ENTREE": 0.0, "SORTIE": 0.0},
         "VIREMENT": {"ENTREE": 0.0, "SORTIE": 0.0},
-        "CHEQUE": {"ENTREE": 0.0, "SORTIE": 0.0},
+        "CHEQUE": {"ENTREE": 0.0, "SORTIE": 0.0}
     }
-
+    
     for mode, type_t, total in totaux_raw:
         if mode in totaux and type_t in totaux[mode]:
             totaux[mode][type_t] = total or 0.0
 
     solde_especes = totaux["ESPECES"]["ENTREE"] - totaux["ESPECES"]["SORTIE"]
     solde_mobile = (
-        (totaux["BANKILY"]["ENTREE"] - totaux["BANKILY"]["SORTIE"])
-        + (totaux["MASRVI"]["ENTREE"] - totaux["MASRVI"]["SORTIE"])
-        + (totaux["SEDAD"]["ENTREE"] - totaux["SEDAD"]["SORTIE"])
+        (totaux["BANKILY"]["ENTREE"] - totaux["BANKILY"]["SORTIE"]) +
+        (totaux["MASRVI"]["ENTREE"] - totaux["MASRVI"]["SORTIE"]) +
+        (totaux["SEDAD"]["ENTREE"] - totaux["SEDAD"]["SORTIE"])
     )
     solde_banque = (
-        (totaux["VIREMENT"]["ENTREE"] - totaux["VIREMENT"]["SORTIE"])
-        + (totaux["CHEQUE"]["ENTREE"] - totaux["CHEQUE"]["SORTIE"])
+        (totaux["VIREMENT"]["ENTREE"] - totaux["VIREMENT"]["SORTIE"]) +
+        (totaux["CHEQUE"]["ENTREE"] - totaux["CHEQUE"]["SORTIE"])
     )
     solde_total = solde_especes + solde_mobile + solde_banque
 
@@ -219,9 +149,9 @@ def obtenir_historique_et_solde():
             "motif": r[4],
             "mode": r[5],
             "heure": r[6].split(" ")[1] if " " in r[6] else r[6],
-            "categorie": r[7] if r[7] else "GÉNÉRAL",
-            "entite": r[8] if r[8] else "",
-            "justificatifs": justificatifs.get(r[0], []),
+            "categorie": r[7] if len(r) > 7 else "GÉNÉRAL",
+            "entite": r[8] if len(r) > 8 else "",
+            "justificatifs": justificatifs.get(r[0], [])
         }
         for r in rows
     ]
@@ -231,95 +161,175 @@ def obtenir_historique_et_solde():
         "solde_especes": solde_especes,
         "solde_mobile": solde_mobile,
         "solde_banque": solde_banque,
-        "transactions": transactions,
+        "transactions": transactions
     }
-
 
 @app.get("/api/data")
 async def get_data():
     return JSONResponse(obtenir_historique_et_solde())
 
-
 @app.post("/api/ajouter")
 async def api_ajouter(request: Request):
-    content_type = request.headers.get("content-type", "")
+    """
+    Enregistre une entrée/sortie avec ou sans justificatif.
+    Utilise toujours multipart/form-data côté navigateur.
+    Les fichiers sont traités après création de la transaction.
+    """
 
-    if "multipart/form-data" in content_type:
+    try:
         form = await request.form()
 
-        utilisateur = str(form.get("utilisateur", "Inconnu"))
-        type_trans = str(form.get("type", ""))
-        montant = float(form.get("montant", 0))
-        motif = str(form.get("motif", ""))
-        mode_paiement = str(form.get("mode_paiement", "ESPECES"))
-        categorie = str(form.get("categorie", "GÉNÉRAL"))
-        entite = str(form.get("entite", ""))
+        utilisateur = str(form.get("utilisateur", "Inconnu")).strip()
+        type_trans = str(form.get("type", "")).strip().upper()
+        motif = str(form.get("motif", "")).strip()
+        mode_paiement = str(form.get("mode_paiement", "ESPECES")).strip()
+        categorie = str(form.get("categorie", "GÉNÉRAL")).strip()
+        entite = str(form.get("entite", "")).strip()
 
+        montant_raw = str(form.get("montant", "0")).strip().replace(",", ".")
+        montant = float(montant_raw)
+
+        if type_trans not in ("ENTREE", "SORTIE"):
+            return JSONResponse(
+                {"success": False, "message": "Type d'opération invalide."},
+                status_code=400
+            )
+
+        if montant <= 0:
+            return JSONResponse(
+                {"success": False, "message": "Le montant doit être supérieur à 0."},
+                status_code=400
+            )
+
+        if not motif:
+            return JSONResponse(
+                {"success": False, "message": "Le motif est obligatoire."},
+                status_code=400
+            )
+
+        # 1. On crée d'abord la transaction.
         transaction_id = ajouter_transaction(
-            utilisateur=utilisateur,
+            utilisateur=utilisateur or "Inconnu",
             type_trans=type_trans,
             montant=montant,
             motif=motif,
             mode_paiement=mode_paiement,
-            categorie=categorie,
-            entite=entite,
+            categorie=categorie or "GÉNÉRAL",
+            entite=entite
         )
 
-        # DEBUG: Voir quels fichiers sont reçus
-        fichiers = form.getlist("justificatifs")
-        print(f"=== FICHIERS REÇUS: {len(fichiers)} ===")
-
+        # 2. Puis on traite les justificatifs, s'il y en a.
         extensions_autorisees = {
-            ".jpg",
-            ".jpeg",
-            ".png",
-            ".webp",
-            ".pdf",
-            ".jfif",
+            ".jpg", ".jpeg", ".png", ".webp", ".pdf"
         }
 
-        for fichier in fichiers:
-            print(f"Traitement fichier: {fichier.filename}")
-            if not isinstance(fichier, UploadFile) or not fichier.filename:
-                print("-> Fichier ignoré (vide ou invalide)")
+        fichiers_enregistres = 0
+        erreurs_fichiers = []
+
+        for fichier in form.getlist("justificatifs"):
+            if not isinstance(fichier, UploadFile):
                 continue
 
-            extension = os.path.splitext(fichier.filename)[1].lower()
+            if not fichier.filename:
+                continue
+
+            nom_original = os.path.basename(fichier.filename)
+            extension = os.path.splitext(nom_original)[1].lower()
+
             if extension not in extensions_autorisees:
-                print(f"-> Extension non autorisée: {extension}")
+                erreurs_fichiers.append(
+                    f"{nom_original}: format non autorisé"
+                )
                 continue
 
             contenu = await fichier.read()
-            print(f"-> Taille contenu: {len(contenu)} octets")
 
-            if len(contenu) == 0:
-                print("-> Fichier vide (0 octets)")
+            # Maximum 10 Mo par fichier
+            if len(contenu) > 10 * 1024 * 1024:
+                erreurs_fichiers.append(
+                    f"{nom_original}: fichier supérieur à 10 Mo"
+                )
                 continue
 
-            nom_unique = f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{transaction_id}_{os.path.basename(fichier.filename)}"
-            chemin_physique = os.path.join(JUSTIFICATIFS_DIR, nom_unique)
+            if len(contenu) == 0:
+                erreurs_fichiers.append(
+                    f"{nom_original}: fichier vide"
+                )
+                continue
 
-            with open(chemin_physique, "wb") as sortie:
-                sortie.write(contenu)
-
-            print(f"-> Écrit avec succès à: {chemin_physique}")
-
-            enregistrer_justificatif(
-                transaction_id=transaction_id,
-                nom_fichier=nom_unique,
-                nom_original=os.path.basename(fichier.filename),
-                type_fichier=fichier.content_type or "",
-                chemin=chemin_physique,
+            # Nom sécurisé et unique
+            nom_unique = (
+                f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+                f"_{transaction_id}_{fichiers_enregistres}"
+                f"{extension}"
             )
 
-        return JSONResponse(obtenir_historique_et_solde())
+            chemin_relatif = os.path.join(
+                JUSTIFICATIFS_DIR,
+                nom_unique
+            )
+
+            try:
+                with open(chemin_relatif, "wb") as sortie:
+                    sortie.write(contenu)
+
+                enregistrer_justificatif(
+                    transaction_id=transaction_id,
+                    nom_fichier=nom_unique,
+                    nom_original=nom_original,
+                    type_fichier=fichier.content_type or "",
+                    chemin=chemin_relatif
+                )
+
+                fichiers_enregistres += 1
+
+            except Exception as fichier_error:
+                erreurs_fichiers.append(
+                    f"{nom_original}: {str(fichier_error)}"
+                )
+
+        # La transaction est considérée comme enregistrée même
+        # si aucun justificatif n'a été sélectionné.
+        resultat = obtenir_historique_et_solde()
+        resultat["success"] = True
+        resultat["transaction_id"] = transaction_id
+        resultat["justificatifs_enregistres"] = fichiers_enregistres
+
+        if erreurs_fichiers:
+            resultat["message"] = (
+                "Opération enregistrée, mais certains justificatifs "
+                "n'ont pas pu être enregistrés."
+            )
+            resultat["erreurs_fichiers"] = erreurs_fichiers
+        else:
+            resultat["message"] = "Opération enregistrée avec succès."
+
+        return JSONResponse(resultat)
+
+    except ValueError:
+        return JSONResponse(
+            {
+                "success": False,
+                "message": "Le montant saisi est invalide."
+            },
+            status_code=400
+        )
+
+    except Exception as e:
+        return JSONResponse(
+            {
+                "success": False,
+                "message": f"Erreur lors de l'enregistrement : {str(e)}"
+            },
+            status_code=500
+        )
 
 @app.post("/api/cloturer")
 async def api_cloturer():
     cloturer_caisse()
     return JSONResponse(obtenir_historique_et_solde())
 
-
+# --- EXPORTATION EXCEL (.XLSX) ---
 @app.get("/api/export/excel")
 async def export_excel():
     conn = sqlite3.connect("caisse.db")
@@ -335,59 +345,44 @@ async def export_excel():
     ws = wb.active
     ws.title = "Journal de Caisse"
 
+    # En-têtes
     headers = [
-        "ID",
-        "Horodatage",
-        "Agent",
-        "Type Opération",
-        "Catégorie",
-        "Client / Banque / Agent",
-        "Motif",
-        "Mode Règlement",
-        "Montant (MRU)",
-        "Montant (MRO)",
-        "Statut Clôture",
+        "ID", "Horodatage", "Agent", "Type Opération", 
+        "Catégorie", "Client / Banque / Agent", "Motif", 
+        "Mode Règlement", "Montant (MRU)", "Montant (MRO)", "Statut Clôture"
     ]
     ws.append(headers)
 
-    header_fill = PatternFill(
-        start_color="1F2937", end_color="1F2937", fill_type="solid"
-    )
+    # Style des en-têtes
+    header_fill = PatternFill(start_color="1F2937", end_color="1F2937", fill_type="solid")
     header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-
+    
     for col_num in range(1, len(headers) + 1):
         cell = ws.cell(row=1, column=col_num)
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
+    # Données
     thin_border = Border(
-        left=Side(style="thin", color="E5E7EB"),
-        right=Side(style="thin", color="E5E7EB"),
-        top=Side(style="thin", color="E5E7EB"),
-        bottom=Side(style="thin", color="E5E7EB"),
+        left=Side(style='thin', color='E5E7EB'),
+        right=Side(style='thin', color='E5E7EB'),
+        top=Side(style='thin', color='E5E7EB'),
+        bottom=Side(style='thin', color='E5E7EB')
     )
 
     for r in rows:
         montant_mru = r[8]
         montant_mro = montant_mru * 10
         statut = "Clôturé" if r[9] == 1 else "En cours"
-
+        
         row_data = [
-            r[0],
-            r[1],
-            r[2],
-            r[3],
-            r[4],
-            r[5],
-            r[6],
-            r[7],
-            montant_mru,
-            montant_mro,
-            statut,
+            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], 
+            montant_mru, montant_mro, statut
         ]
         ws.append(row_data)
 
+        # Style visuel par type d'opération
         current_row = ws.max_row
         type_cell = ws.cell(row=current_row, column=4)
         if r[3] == "ENTREE":
@@ -398,8 +393,9 @@ async def export_excel():
         for col_idx in range(1, len(headers) + 1):
             ws.cell(row=current_row, column=col_idx).border = thin_border
 
+    # Ajustement des largeurs de colonnes
     for col in ws.columns:
-        max_len = max(len(str(cell.value or "")) for cell in col)
+        max_len = max(len(str(cell.value or '')) for cell in col)
         col_letter = get_column_letter(col[0].column)
         ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
 
@@ -407,18 +403,14 @@ async def export_excel():
     wb.save(output)
     output.seek(0)
 
-    filename = (
-        f"Journal_Caisse_Nettoyage_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-    )
+    filename = f"Journal_Caisse_Nettoyage_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
     return StreamingResponse(
         output,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
-
+# --- EXPORTATION CSV ---
 @app.get("/api/export/csv")
 async def export_csv():
     conn = sqlite3.connect("caisse.db")
@@ -431,50 +423,30 @@ async def export_csv():
     conn.close()
 
     output = io.StringIO()
-    writer = csv.writer(output, delimiter=";")
+    writer = csv.writer(output, delimiter=';')
     writer.writerow([
-        "ID",
-        "Horodatage",
-        "Agent",
-        "Type Operation",
-        "Categorie",
-        "Client / Banque / Agent",
-        "Motif",
-        "Mode Reglement",
-        "Montant (MRU)",
-        "Montant (MRO)",
-        "Statut Cloture",
+        "ID", "Horodatage", "Agent", "Type Operation", 
+        "Categorie", "Client / Banque / Agent", "Motif", 
+        "Mode Reglement", "Montant (MRU)", "Montant (MRO)", "Statut Cloture"
     ])
 
     for r in rows:
         writer.writerow([
-            r[0],
-            r[1],
-            r[2],
-            r[3],
-            r[4],
-            r[5],
-            r[6],
-            r[7],
-            r[8],
-            r[8] * 10,
-            "Cloture" if r[9] == 1 else "En cours",
+            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], 
+            r[8], r[8] * 10, "Cloture" if r[9] == 1 else "En cours"
         ])
 
     output.seek(0)
-    filename = (
-        f"Journal_Caisse_Nettoyage_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
-    )
+    filename = f"Journal_Caisse_Nettoyage_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
     return StreamingResponse(
-        io.BytesIO(output.getvalue().encode("utf-8-sig")),
+        io.BytesIO(output.getvalue().encode('utf-8-sig')),
         media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
-
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 async def get_interface():
-    return r"""
+    html_code = """
     <!DOCTYPE html>
     <html lang="fr">
     <head>
@@ -494,6 +466,7 @@ async def get_interface():
 
         <div class="max-w-md mx-auto bg-white rounded-xl shadow-md p-4 sm:p-5 space-y-4">
             
+            <!-- Session Utilisateur -->
             <div class="bg-blue-50 p-2 rounded-lg border border-blue-200 flex justify-between items-center">
                 <div>
                     <label class="block text-[10px] font-bold text-blue-800 uppercase">Agent de Caisse :</label>
@@ -505,6 +478,7 @@ async def get_interface():
                 <span class="text-xs bg-blue-200 text-blue-800 font-bold px-2 py-1 rounded">MRU / MRO</span>
             </div>
 
+            <!-- Tableau de bord ventilation des soldes -->
             <div class="bg-slate-900 text-white p-4 rounded-xl shadow space-y-3">
                 <div class="text-center border-b border-slate-800 pb-2">
                     <span class="text-xs text-slate-400 font-medium uppercase tracking-wider">Solde Total En Caisse</span>
@@ -528,6 +502,7 @@ async def get_interface():
                 </div>
             </div>
 
+            <!-- Saisie Transaction -->
             <div class="space-y-2 border-t pt-2">
                 <h3 class="text-xs font-bold text-slate-600 uppercase">Nouvelle Opération</h3>
                 
@@ -570,24 +545,43 @@ async def get_interface():
                     </select>
                 </div>
 
+                <!-- Facture / justificatif -->
                 <div class="bg-amber-50 border border-amber-200 rounded-lg p-2 space-y-2">
                     <div class="flex items-center justify-between">
-                        <label class="text-[10px] font-bold text-amber-800 uppercase">📌 Facture / Justificatif</label>
+                        <label class="text-[10px] font-bold text-amber-800 uppercase">
+                            📎 Facture / Justificatif
+                        </label>
                         <span class="text-[9px] text-amber-700">JPG, PNG, WEBP ou PDF • max 10 Mo</span>
                     </div>
 
-                    <input id="justificatifs" type="file" accept="image/*,.pdf" multiple onchange="afficherFichiersSelectionnes()" class="w-full text-[10px] bg-white border border-amber-200 rounded-lg p-1.5">
+                    <input
+                        id="justificatifs"
+                        type="file"
+                        accept="image/*,.pdf"
+                        multiple
+                        class="w-full text-[10px] bg-white border border-amber-200 rounded-lg p-1.5"
+                    >
 
+                    <!-- Sur téléphone, ce bouton ouvre directement l'appareil photo -->
                     <label class="block">
-                        <span class="text-[10px] text-amber-800 font-semibold">📷 Scanner / photographier le justificatif</span>
-                        <input id="scanner" type="file" accept="image/*" capture="environment" onchange="afficherFichiersSelectionnes()" class="w-full text-[10px] mt-1 bg-white border border-amber-200 rounded-lg p-1.5">
+                        <span class="text-[10px] text-amber-800 font-semibold">
+                            📷 Scanner / photographier le justificatif
+                        </span>
+                        <input
+                            id="scanner"
+                            type="file"
+                            accept="image/*"
+                            capture="environment"
+                            class="w-full text-[10px] mt-1 bg-white border border-amber-200 rounded-lg p-1.5"
+                        >
                     </label>
 
                     <div id="fichiers-selectionnes" class="text-[10px] text-slate-600"></div>
                 </div>
 
                 <div class="flex gap-2 pt-1">
-                    <button type="button" onclick="envoyer('ENTREE')" class="w-1/2 bg-green-600 hover:bg-green-700 text-white font-bold py-2 rounded-lg text-xs shadow">
+                    <button type="button" onclick="envoyer('ENTREE')"
+ class="w-1/2 bg-green-600 hover:bg-green-700 text-white font-bold py-2 rounded-lg text-xs shadow">
                         + ENTRÉE (Recette)
                     </button>
                     <button type="button" onclick="envoyer('SORTIE')" class="w-1/2 bg-red-600 hover:bg-red-700 text-white font-bold py-2 rounded-lg text-xs shadow">
@@ -596,11 +590,13 @@ async def get_interface():
                 </div>
             </div>
 
+            <!-- Historique -->
             <div class="border-t pt-2">
-                <h2 class="text-xs font-bold text-slate-500 uppercase mb-2">Historique des Opérations du Jour</h2>
-                <div id="historique" class="space-y-2 max-h-64 overflow-y-auto pr-1"></div>
+                <h2 class="text-xs font-bold text-slate-500 uppercase mb-2">Historique des Opérations</h2>
+                <div id="historique" class="space-y-2 max-h-52 overflow-y-auto pr-1"></div>
             </div>
 
+            <!-- Exportation & Bilan -->
             <div class="border-t pt-3 space-y-2">
                 <div class="grid grid-cols-2 gap-2">
                     <a href="/api/export/excel" download class="bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold py-2 rounded-lg flex items-center justify-center gap-1 shadow">
@@ -619,23 +615,7 @@ async def get_interface():
             </div>
         </div>
 
-        <!-- Visionneuse d'images / Lightbox Modal -->
-        <div id="image-modal" class="fixed inset-0 bg-black/80 hidden z-50 flex flex-col items-center justify-center p-4 cursor-pointer" onclick="fermerModal()">
-            <div class="relative max-w-3xl max-h-[90vh] bg-white rounded-lg p-3 overflow-hidden shadow-2xl flex flex-col items-center" onclick="event.stopPropagation()">
-                <button onclick="fermerModal()" class="absolute top-2 right-2 bg-slate-800 text-white w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm shadow hover:bg-black z-10">✕</button>
-                <img id="modal-img" src="" alt="Aperçu Grand Format" class="max-w-full max-h-[75vh] object-contain rounded" />
-                
-                <div class="flex gap-4 mt-3">
-                    <a id="modal-download" href="" download class="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-1.5 px-3 rounded flex items-center gap-1 shadow">
-                        📥 Télécharger la photo
-                    </a>
-                    <a id="modal-open-tab" href="" target="_blank" class="bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold text-xs py-1.5 px-3 rounded flex items-center gap-1">
-                        🔗 Ouvrir en grand
-                    </a>
-                </div>
-            </div>
-        </div>
-
+        <!-- Zone d'impression PDF -->
         <div id="rapport-print" class="hidden p-6">
             <h1 class="text-2xl font-bold border-b pb-2 mb-2">Rapport Journalier - Société de Nettoyage</h1>
             <p class="text-xs text-gray-600 mb-4">Généré le : <span id="print-date"></span></p>
@@ -650,18 +630,6 @@ async def get_interface():
         </div>
 
         <script>
-            function ouvrirModal(url, nomFichier) {
-                document.getElementById('modal-img').src = url;
-                document.getElementById('modal-download').href = url;
-                document.getElementById('modal-download').setAttribute('download', nomFichier || 'justificatif.jpg');
-                document.getElementById('modal-open-tab').href = url;
-                document.getElementById('image-modal').classList.remove('hidden');
-            }
-
-            function fermerModal() {
-                document.getElementById('image-modal').classList.add('hidden');
-            }
-
             function calculerMRO() {
                 const val = document.getElementById('montant').value;
                 document.getElementById('mro-live').innerText = val ? (val * 10).toLocaleString() + ' MRO' : '0 MRO';
@@ -688,52 +656,39 @@ async def get_interface():
                 histDiv.innerHTML = '';
 
                 if (!data.transactions || data.transactions.length === 0) {
-                    histDiv.innerHTML = '<div class="text-center text-xs text-slate-400 py-3">Aucune opération pour cette journée</div>';
+                    histDiv.innerHTML = '<div class="text-center text-xs text-slate-400 py-3">Aucune opération enregistrée</div>';
                     return;
                 }
 
                 data.transactions.forEach(t => {
                     const color = t.type === 'ENTREE' ? 'text-green-700 bg-green-50 border-green-200' : 'text-red-700 bg-red-50 border-red-200';
                     const sign = t.type === 'ENTREE' ? '+' : '-';
-                    const entiteText = t.entite ? ` • <span class="font-semibold">${escapeHtml(t.entite)}</span>` : '';
+                    const entiteText = t.entite ? ` • <span class="font-semibold">${t.entite}</span>` : '';
                     
-                    let htmlJustificatifs = '';
-                    if (t.justificatifs && t.justificatifs.length > 0) {
-                        htmlJustificatifs = `
-                            <div class="pt-1.5 border-t border-slate-200/80 mt-1">
-                                <div class="font-semibold text-[10px] mb-1 text-slate-600">📁 Justificatif(s) attaché(s) :</div>
-                                <div class="flex flex-wrap gap-2">
-                                    ${t.justificatifs.map(j => {
-                                        const isPdf = j.type && j.type.includes('pdf');
-                                        if (isPdf) {
-                                            return `
-                                                <a href="${j.url}" target="_blank" download="${escapeHtml(j.nom)}" class="inline-flex items-center gap-1 px-2 py-1 rounded bg-white border border-slate-300 hover:bg-slate-100 text-[10px] text-blue-700 font-bold shadow-sm">
-                                                    📄 ${escapeHtml(j.nom)} 📥
-                                                </a>`;
-                                        }
-                                        return `
-                                            <div class="relative group">
-                                                <img src="${j.url}" alt="${escapeHtml(j.nom)}" onclick="ouvrirModal('${j.url}', '${escapeHtml(j.nom)}')" class="w-14 h-14 object-cover rounded-lg border border-slate-300 shadow-sm hover:opacity-80 transition cursor-pointer" />
-                                                <a href="${j.url}" download="${escapeHtml(j.nom)}" title="Télécharger" class="absolute bottom-0 right-0 bg-black/70 text-white text-[9px] p-0.5 px-1 rounded-tl rounded-br font-bold hover:bg-black">
-                                                    📥
-                                                </a>
-                                            </div>`;
-                                    }).join('')}
-                                </div>
-                            </div>`;
-                    }
-
                     histDiv.innerHTML += `
                         <div class="p-2 rounded-lg border ${color} text-xs space-y-1">
                             <div class="flex justify-between items-center font-bold">
-                                <span>[${t.mode}] ${escapeHtml(t.motif)}</span>
+                                <span>[${t.mode}] ${t.motif}</span>
                                 <span class="text-sm">${sign}${t.montant.toLocaleString()} MRU</span>
                             </div>
                             <div class="flex justify-between items-center text-[10px] text-slate-500">
-                                <span>🏷️ ${escapeHtml(t.categorie)}${entiteText}</span>
-                                <span>${escapeHtml(t.utilisateur)} à ${t.heure}</span>
+                                <span>🏷️ ${t.categorie}${entiteText}</span>
+                                <span>${t.utilisateur} à ${t.heure}</span>
                             </div>
-                            ${htmlJustificatifs}
+
+                            ${t.justificatifs && t.justificatifs.length ? `
+                                <div class="pt-1 border-t border-slate-200 mt-1">
+                                    <div class="font-semibold text-[10px] mb-1">📎 Justificatif(s)</div>
+                                    <div class="flex flex-wrap gap-1">
+                                        ${t.justificatifs.map(j => `
+                                            <a href="${j.url}" target="_blank"
+                                               class="inline-flex items-center gap-1 px-2 py-1 rounded bg-white border border-slate-200 hover:bg-slate-50 text-[10px] text-blue-700">
+                                                ${j.type && j.type.includes('pdf') ? '📄' : '🖼️'} ${escapeHtml(j.nom)}
+                                            </a>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            ` : ''}
                         </div>
                     `;
                 });
@@ -752,150 +707,202 @@ async def get_interface():
                 const fichiers = [...input.files, ...scanner.files];
 
                 if (!fichiers.length) {
-                    zone.innerText = '';
+                    zone.innerText = 'Aucun justificatif sélectionné.';
                     return;
                 }
 
-                zone.innerHTML = '';
-                fichiers.forEach(f => {
-                    const wrapper = document.createElement('div');
-                    wrapper.className = 'flex items-center gap-2 mt-1 p-1 bg-white rounded border border-amber-200';
-
-                    if (f.type.startsWith('image/')) {
-                        const imgUrl = URL.createObjectURL(f);
-                        const img = document.createElement('img');
-                        img.src = imgUrl;
-                        img.className = 'w-10 h-10 object-cover rounded cursor-pointer hover:opacity-80 transition';
-                        img.onclick = () => ouvrirModal(imgUrl, f.name);
-                        wrapper.appendChild(img);
-                    } else {
-                        const icon = document.createElement('span');
-                        icon.innerText = '📄';
-                        wrapper.appendChild(icon);
-                    }
-
-                    const details = document.createElement('span');
-                    details.className = 'text-[10px] text-slate-700 font-semibold truncate';
-                    details.innerText = `${f.name} (${(f.size / 1024 / 1024).toFixed(2)} Mo)`;
-
-                    wrapper.appendChild(details);
-                    zone.appendChild(wrapper);
-                });
+                zone.innerHTML = fichiers.map(f =>
+                    `📎 ${escapeHtml(f.name)} (${(f.size / 1024 / 1024).toFixed(2)} Mo)`
+                ).join('<br>');
             }
 
-            async function envoyer(typeTrans) {
-                const utilisateur = document.getElementById('user-select').value;
-                const montant = parseFloat(document.getElementById('montant').value);
-                const motif = document.getElementById('motif').value;
-                const mode_paiement = document.getElementById('mode-paiement').value;
+            document.getElementById('justificatifs').addEventListener('change', afficherFichiersSelectionnes);
+            document.getElementById('scanner').addEventListener('change', afficherFichiersSelectionnes);
+
+            async function envoyer(type) {
+                const boutonEntree = document.querySelector(
+                    'button[onclick="envoyer(\'ENTREE\')"]'
+                );
+                const boutonSortie = document.querySelector(
+                    'button[onclick="envoyer(\'SORTIE\')"]'
+                );
+
+                const currentUser = document.getElementById('user-select').value;
+                const motif = document.getElementById('motif').value.trim();
+                const montant = document.getElementById('montant').value.trim();
+                const modePaiement = document.getElementById('mode-paiement').value;
                 const categorie = document.getElementById('categorie').value;
-                const entite = document.getElementById('entite').value;
+                const entite = document.getElementById('entite').value.trim();
 
-                const inputFiles = document.getElementById('justificatifs').files;
-                const scannerFiles = document.getElementById('scanner').files;
-
-                if (!montant || montant <= 0 || !motif) {
-                    alert('Veuillez remplir le montant et le motif.');
+                if (!motif) {
+                    alert('Veuillez saisir le motif.');
+                    document.getElementById('motif').focus();
                     return;
                 }
 
-                const formData = new FormData();
-                formData.append('utilisateur', utilisateur);
-                formData.append('type', typeTrans);
-                formData.append('montant', montant);
-                formData.append('motif', motif);
-                formData.append('mode_paiement', mode_paiement);
-                formData.append('categorie', categorie);
-                formData.append('entite', entite);
-
-                for (let f of inputFiles) {
-                    formData.append('justificatifs', f);
+                if (!montant || parseFloat(montant) <= 0) {
+                    alert('Veuillez saisir un montant valide.');
+                    document.getElementById('montant').focus();
+                    return;
                 }
-                for (let f of scannerFiles) {
-                    formData.append('justificatifs', f);
+
+                // Récupération des fichiers depuis les deux champs.
+                const inputFichiers = document.getElementById('justificatifs');
+                const inputScanner = document.getElementById('scanner');
+
+                const fichiers = [
+                    ...Array.from(inputFichiers.files || []),
+                    ...Array.from(inputScanner.files || [])
+                ];
+
+                // Vérification des tailles avant l'envoi.
+                const fichierTropGros = fichiers.find(
+                    fichier => fichier.size > 10 * 1024 * 1024
+                );
+
+                if (fichierTropGros) {
+                    alert(
+                        `Le fichier "${fichierTropGros.name}" dépasse la limite de 10 Mo.`
+                    );
+                    return;
+                }
+
+                // Désactive les boutons pendant l'enregistrement
+                // pour éviter les doubles clics.
+                if (boutonEntree) boutonEntree.disabled = true;
+                if (boutonSortie) boutonSortie.disabled = true;
+
+                const texteBouton = type === 'ENTREE'
+                    ? '+ ENTRÉE (Enregistrement...)'
+                    : '- SORTIE (Enregistrement...)';
+
+                const boutonActuel = type === 'ENTREE'
+                    ? boutonEntree
+                    : boutonSortie;
+
+                const ancienTexte = boutonActuel
+                    ? boutonActuel.innerText
+                    : '';
+
+                if (boutonActuel) {
+                    boutonActuel.innerText = texteBouton;
                 }
 
                 try {
+                    const formData = new FormData();
+
+                    formData.append('utilisateur', currentUser);
+                    formData.append('type', type);
+                    formData.append('montant', String(parseFloat(montant)));
+                    formData.append('motif', motif);
+                    formData.append('mode_paiement', modePaiement);
+                    formData.append('categorie', categorie);
+                    formData.append('entite', entite);
+
+                    // Important : chaque fichier porte le même nom de champ.
+                    fichiers.forEach(fichier => {
+                        formData.append(
+                            'justificatifs',
+                            fichier,
+                            fichier.name
+                        );
+                    });
+
                     const res = await fetch('/api/ajouter', {
                         method: 'POST',
                         body: formData
                     });
 
-                    if (res.ok) {
-                        document.getElementById('montant').value = '';
-                        document.getElementById('motif').value = '';
-                        document.getElementById('entite').value = '';
-                        document.getElementById('justificatifs').value = '';
-                        document.getElementById('scanner').value = '';
-                        document.getElementById('fichiers-selectionnes').innerText = '';
-                        calculerMRO();
+                    let data = null;
 
-                        const data = await res.json();
-                        mettreAJourUI(data);
-                    } else {
-                        alert("Erreur lors de l'enregistrement.");
+                    try {
+                        data = await res.json();
+                    } catch (jsonError) {
+                        throw new Error(
+                            `Réponse invalide du serveur (${res.status}).`
+                        );
                     }
+
+                    if (!res.ok || !data.success) {
+                        throw new Error(
+                            data.message ||
+                            `Erreur serveur (${res.status}).`
+                        );
+                    }
+
+                    // Mise à jour immédiate de l'écran.
+                    mettreAJourUI(data);
+
+                    // Réinitialisation des champs.
+                    document.getElementById('motif').value = '';
+                    document.getElementById('montant').value = '';
+                    document.getElementById('entite').value = '';
+                    inputFichiers.value = '';
+                    inputScanner.value = '';
+                    document.getElementById(
+                        'fichiers-selectionnes'
+                    ).innerText = 'Aucun justificatif sélectionné.';
+                    document.getElementById(
+                        'mro-live'
+                    ).innerText = '0 MRO';
+
+                    if (data.justificatifs_enregistres > 0) {
+                        alert(
+                            `Opération enregistrée avec ${data.justificatifs_enregistres} justificatif(s).`
+                        );
+                    } else {
+                        alert('Opération enregistrée avec succès.');
+                    }
+
+                    if (data.erreurs_fichiers && data.erreurs_fichiers.length) {
+                        alert(
+                            'Attention :\n' +
+                            data.erreurs_fichiers.join('\n')
+                        );
+                    }
+
                 } catch (e) {
-                    console.error(e);
-                    alert("Erreur réseau.");
+                    console.error('Erreur enregistrement:', e);
+                    alert(
+                        "Impossible d'enregistrer l'opération.\n\n" +
+                        e.message
+                    );
+                } finally {
+                    // Réactive toujours les boutons.
+                    if (boutonEntree) boutonEntree.disabled = false;
+                    if (boutonSortie) boutonSortie.disabled = false;
+
+                    if (boutonActuel && ancienTexte) {
+                        boutonActuel.innerText = ancienTexte;
+                    }
                 }
             }
 
+            function imprimerPDF() {
+                document.getElementById('print-date').innerText = new Date().toLocaleString();
+                document.getElementById('print-total').innerText = document.getElementById('solde-total').innerText;
+                document.getElementById('print-especes').innerText = document.getElementById('solde-especes').innerText;
+                document.getElementById('print-mobile').innerText = document.getElementById('solde-mobile').innerText;
+                document.getElementById('print-banque').innerText = document.getElementById('solde-banque').innerText;
+                document.getElementById('print-table').innerHTML = document.getElementById('historique').innerHTML;
+                
+                document.getElementById('rapport-print').classList.remove('hidden');
+                window.print();
+                document.getElementById('rapport-print').classList.add('hidden');
+            }
+
             async function cloturerJournee() {
-                if (confirm("Voulez-vous vraiment clôturer la journée ? Les soldes repasseront à zéro pour la nouvelle session.")) {
+                if (confirm("Voulez-vous réinitialiser le solde et clôturer la journée ?")) {
                     const res = await fetch('/api/cloturer', { method: 'POST' });
                     const data = await res.json();
                     mettreAJourUI(data);
                 }
             }
 
-            async function imprimerPDF() {
-                const res = await fetch('/api/data');
-                const data = await res.json();
-
-                document.getElementById('print-date').innerText = new Date().toLocaleString('fr-FR');
-                document.getElementById('print-total').innerText = data.solde_total.toLocaleString() + ' MRU';
-                document.getElementById('print-especes').innerText = data.solde_especes.toLocaleString() + ' MRU';
-                document.getElementById('print-mobile').innerText = data.solde_mobile.toLocaleString() + ' MRU';
-                document.getElementById('print-banque').innerText = data.solde_banque.toLocaleString() + ' MRU';
-
-                let htmlTable = `
-                    <table class="w-full text-left text-xs border-collapse">
-                        <thead>
-                            <tr class="bg-gray-100 border-b">
-                                <th class="p-2">Heure</th>
-                                <th class="p-2">Agent</th>
-                                <th class="p-2">Catégorie</th>
-                                <th class="p-2">Motif</th>
-                                <th class="p-2">Mode</th>
-                                <th class="p-2">Montant</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                `;
-
-                data.transactions.forEach(t => {
-                    const sign = t.type === 'ENTREE' ? '+' : '-';
-                    htmlTable += `
-                        <tr class="border-b">
-                            <td class="p-2">${t.heure}</td>
-                            <td class="p-2">${escapeHtml(t.utilisateur)}</td>
-                            <td class="p-2">${escapeHtml(t.categorie)}</td>
-                            <td class="p-2">${escapeHtml(t.motif)}</td>
-                            <td class="p-2">${t.mode}</td>
-                            <td class="p-2 font-bold">${sign}${t.montant.toLocaleString()} MRU</td>
-                        </tr>
-                    `;
-                });
-
-                htmlTable += '</tbody></table>';
-                document.getElementById('print-table').innerHTML = htmlTable;
-
-                window.print();
-            }
-
             chargerDonnees();
+            setInterval(chargerDonnees, 3000);
         </script>
     </body>
     </html>
     """
+    return HTMLResponse(content=html_code)
