@@ -5,7 +5,7 @@ import secrets
 from datetime import datetime
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 import openpyxl
@@ -43,6 +43,14 @@ JUSTIFICATIFS_DIR = os.path.join(BASE_DIR, "justificatifs")
 os.makedirs(JUSTIFICATIFS_DIR, exist_ok=True)
 
 app.mount("/justificatifs", StaticFiles(directory=JUSTIFICATIFS_DIR), name="justificatifs")
+
+# Route pour afficher le logo golo.jpeg depuis le dossier static
+@app.get("/golo.jpeg")
+async def get_logo():
+    logo_path = os.path.join(BASE_DIR, "static", "golo.jpeg")
+    if os.path.exists(logo_path):
+        return FileResponse(logo_path)
+    raise HTTPException(status_code=404, detail="Logo non trouvé")
 
 def get_db():
     if DATABASE_URL:
@@ -501,18 +509,23 @@ async def get_interface():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Gestion de Caisse Sécurisée</title>
+        <title>Gestion de Caisse - ClearEcolo Cleaner</title>
         <script src="https://cdn.tailwindcss.com"></script>
     </head>
     <body class="bg-slate-100 p-2 sm:p-4 font-sans">
         <div class="max-w-md mx-auto bg-white rounded-xl shadow-md p-4 space-y-4">
-            <div class="bg-blue-50 p-2 rounded-lg border border-blue-200 flex justify-between items-center">
-                <div>
-                    <label class="block text-[10px] font-bold text-blue-800 uppercase">Agent de Caisse :</label>
-                    <select id="user-select" class="bg-transparent text-sm font-semibold text-blue-900 outline-none">
-                        <option value="Responsable Caisse">Responsable Caisse</option>
-                        <option value="Agent Support">Agent Support</option>
-                    </select>
+            
+            <!-- EN-TÊTE AVEC LOGO ET AGENT DE CAISSE -->
+            <div class="bg-blue-50 p-2.5 rounded-lg border border-blue-200 flex justify-between items-center">
+                <div class="flex items-center space-x-2.5">
+                    <img src="/golo.jpeg" alt="Logo CEC" class="w-10 h-10 object-contain rounded-full bg-white p-0.5 shadow-sm border border-blue-100">
+                    <div>
+                        <label class="block text-[10px] font-bold text-blue-800 uppercase">Agent de Caisse :</label>
+                        <select id="user-select" class="bg-transparent text-sm font-semibold text-blue-900 outline-none cursor-pointer">
+                            <option value="Responsable Caisse">Responsable Caisse</option>
+                            <option value="Agent Support">Agent Support</option>
+                        </select>
+                    </div>
                 </div>
                 <span class="text-xs bg-green-200 text-green-800 font-bold px-2 py-1 rounded">🔒 SÉCURISÉ</span>
             </div>
